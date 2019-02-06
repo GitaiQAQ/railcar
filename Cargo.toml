@@ -1,21 +1,21 @@
 [package]
 name = "railcar"
-version = "1.0.4"
+version = "1.0.5-dev"
 authors = ["Vishvananda Ishaya Abrams <vish.ishaya@oracle.com>"]
 build = "build.rs"
 
 [dependencies]
-caps = "0.2.0"
-clap = "2.24.1"
-error-chain = "0.10.0"
-lazy_static = "^1.1.0"
-libc = "0.2.21"
-log = {version = "0.4.3", features = ["release_max_level_info"] }
-nix = "0.11.0"
-num-traits = "^0.2.5"
+caps = "0.3.0"
+clap = "2.32.0"
+error-chain = "0.12.0"
+lazy_static = "^1.2.0"
+libc = "0.2.48"
+log = {version = "0.4.6", features = ["release_max_level_info"] }
+nix = "0.13.0"
+num-traits = "^0.2.6"
 oci = { path = "oci" }
 prctl = "1.0.0"
-scopeguard = "^0.3.3"
+scopeguard = "^1.0.0"
 seccomp-sys = "0.1.2"
 
 [features]
