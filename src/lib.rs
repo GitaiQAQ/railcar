@@ -3,9 +3,8 @@
 #![cfg_attr(feature = "nightly", feature(start))]
 #![cfg_attr(feature = "nightly", feature(alloc_system))]
 #![allow(unused)]
+#![feature(duration_float)]
 extern crate caps;
-#[macro_use]
-extern crate clap;
 #[macro_use]
 extern crate error_chain;
 #[macro_use]
@@ -32,7 +31,6 @@ pub mod selinux;
 pub mod signals;
 pub mod sync;
 
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use errors::*;
 use lazy_static::initialize;
 use nix::errno::Errno;
@@ -182,6 +180,18 @@ pub mod process {
         Ok(())
     }
 
+    #[inline]
+    pub fn setids(uid: u32, gid: u32, gids: &Vec<u32>) -> Result<()> {
+        // set uid/gid/groups
+        let uid = Uid::from_raw(uid);
+        let gid = Gid::from_raw(gid);
+        setid(uid, gid)?;
+        if !gids.is_empty() {
+            setgroups(gids)?;
+        }
+        Ok(())
+    }
+
     pub fn setid(uid: Uid, gid: Gid) -> Result<()> {
         // set uid/gid
         if let Err(e) = prctl::set_keep_capabilities(true) {
@@ -251,11 +261,141 @@ pub mod process {
         }
     }
 
+    use libc::{c_long, time_t, suseconds_t};
+
+    #[derive(Debug)]
+    pub struct Timeval {
+        tv_sec: time_t,
+        tv_usec: suseconds_t,
+    }
+
+    impl From<libc::timeval> for Timeval {
+        fn from(timeval: libc::timeval) -> Self {
+            Timeval {
+                tv_sec: timeval.tv_sec,
+                tv_usec: timeval.tv_usec
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Rusage {
+        // user time used
+        ru_utime: Timeval,
+        // system time used
+        ru_stime: Timeval,
+        // maximum resident set size
+        ru_maxrss: c_long,
+        // integral shared memory size
+        ru_ixrss: c_long,
+        // integral unshared data size
+        ru_idrss: c_long,
+        // integral unshared stack size
+        ru_isrss: c_long,
+        // page reclaims
+        ru_minflt: c_long,
+        // page faults
+        ru_majflt: c_long,
+        // swaps
+        ru_nswap: c_long,
+        // block input operations
+        ru_inblock: c_long,
+        // block output operations
+        ru_oublock: c_long,
+        // messages sent
+        ru_msgsnd: c_long,
+        // messages received
+        ru_msgrcv: c_long,
+        // signals received
+        ru_nsignals: c_long,
+        // voluntary context switches
+        ru_nvcsw: c_long,
+        // involuntary context switches
+        ru_nivcsw: c_long,
+    }
+
+    impl From<libc::rusage> for Rusage {
+        fn from(rusage: libc::rusage) -> Self {
+            Rusage {
+                ru_utime: Timeval::from(rusage.ru_utime),
+                ru_stime: Timeval::from(rusage.ru_stime),
+                ru_maxrss: rusage.ru_maxrss,
+                ru_ixrss: rusage.ru_ixrss,
+                ru_idrss: rusage.ru_idrss,
+                ru_isrss: rusage.ru_isrss,
+                ru_minflt: rusage.ru_minflt,
+                ru_majflt: rusage.ru_majflt,
+                ru_nswap: rusage.ru_nswap,
+                ru_inblock: rusage.ru_inblock,
+                ru_oublock: rusage.ru_oublock,
+                ru_msgsnd: rusage.ru_msgsnd,
+                ru_msgrcv: rusage.ru_msgrcv,
+                ru_nsignals: rusage.ru_nsignals,
+                ru_nvcsw: rusage.ru_nvcsw,
+                ru_nivcsw: rusage.ru_nivcsw
+            }
+        }
+    }
+
+    pub fn wait4<P: Into<Option<Pid>>>(pid: P, options: Option<WaitPidFlag>) -> ::nix::Result<(WaitStatus, Rusage)> {
+        use self::WaitStatus::*;
+        use libc::{timeval, rusage, getrusage, getpid, rlimit, c_ulong};
+
+        let mut status: i32 = 0;
+        let mut rusage = libc::rusage {
+            ru_utime: timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            ru_stime: timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            ru_maxrss: 0,
+            ru_ixrss: 0,
+            ru_idrss: 0,
+            ru_isrss: 0,
+            ru_minflt: 0,
+            ru_majflt: 0,
+            ru_nswap: 0,
+            ru_inblock: 0,
+            ru_oublock: 0,
+            ru_msgsnd: 0,
+            ru_msgrcv: 0,
+            ru_nsignals: 0,
+            ru_nvcsw: 0,
+            ru_nivcsw: 0,
+        };
+
+        let option_bits = match options {
+            Some(bits) => bits.bits(),
+            None => 0,
+        };
+
+        let res = unsafe {
+            libc::wait4(
+                pid.into().unwrap_or(Pid::from_raw(-1)).into(),
+                &mut status as *mut libc::c_int,
+                option_bits,
+                &mut rusage,
+            )
+        };
+
+        match Errno::result(res)? {
+            0 => Ok((StillAlive, Rusage::from(rusage))),
+            res => Ok((WaitStatus::from_raw(Pid::from_raw(res), status).unwrap(), Rusage::from(rusage))),
+        }
+    }
+
+    use std::time;
+    use std::time::{SystemTime};
+
     /// Wait on all children, but only return if we match child.
     pub fn wait_for_child(child: Pid) -> Result<(i32, Option<Signal>)> {
+        let now = SystemTime::now();
         loop {
             // wait on all children, but only return if we match child.
-            let result = match waitpid(Pid::from_raw(-1), None) {
+            let (result, rusage) = match wait4(Pid::from_raw(-1), None) {
                 Err(::nix::Error::Sys(errno)) => {
                     // ignore EINTR as it gets sent when we get a SIGCHLD
                     if errno == Errno::EINTR {
@@ -269,19 +409,21 @@ pub mod process {
                 }
                 Ok(s) => s,
             };
+            info!("time: {}s", now.elapsed().unwrap().as_float_secs());
+            info!("rusage: {:?}", rusage);
             match result {
                 WaitStatus::Exited(pid, code) => {
                     if child != Pid::from_raw(-1) && pid != child {
                         continue;
                     }
-                    reap_children()?;
+                    debug!("{:?}", reap_children()?);
                     return Ok((code as i32, None));
                 }
                 WaitStatus::Signaled(pid, signal, _) => {
                     if child != Pid::from_raw(-1) && pid != child {
                         continue;
                     }
-                    reap_children()?;
+                    debug!("{:?}", reap_children()?);
                     return Ok((0, Some(signal)));
                 }
                 _ => {}
@@ -353,7 +495,7 @@ pub mod process {
     use nix_ext::setrlimit;
     use nix::sched::unshare;
     use std::io::prelude::*;
-    use oci::{Spec, Hooks, Root};
+    use oci::{Spec, Hooks, Root, LinuxCapabilities, LinuxSeccomp};
     use nix::fcntl::OFlag;
     use nix::sched::CloneFlags;
 
@@ -499,6 +641,8 @@ pub mod process {
     use nix::unistd::close;
     use execute_hook;
     use state;
+    use nix_ext::setgroups;
+    use seccomp;
 
     pub fn do_init(wfd: RawFd, daemonize: bool) -> Result<()> {
         if daemonize {
@@ -895,6 +1039,415 @@ pub fn pseudo_tyy(tty: bool) -> Result<(RawFd, RawFd, RawFd)> {
     }
 }
 
-pub fn collectns() {
+pub fn cgroup_path_normalization(id: &str, cgroups_path: &String) -> Result<String>{
+    let cpath = if cgroups_path.is_empty() {
+        format! {"/{}", id}
+    } else {
+        cgroups_path.clone()
+    };
 
+    // TODO: handle systemd-style cgroup_path
+    if !cpath.starts_with('/') {
+        let msg = "cgroup path must be absolute".to_string();
+        return Err(ErrorKind::InvalidSpec(msg).into());
+    }
+    Ok(cpath)
+}
+
+pub mod container {
+    use errors::*;
+    use signals;
+    use cgroups;
+    use oci::Spec;
+    use nix::unistd::{Pid, getpid};
+    use nix::sys::signal::{SigSet, Signal};
+    use std::os::unix::io::{FromRawFd, RawFd};
+
+    pub fn safe_run_container(
+        id: &str,
+        rootfs: &str,
+        spec: &Spec,
+        init_pid: Pid,
+        init: bool,
+        init_only: bool,
+        daemonize: bool,
+        csocketfd: RawFd,
+        consolefd: RawFd,
+        tsocketfd: RawFd,
+    ) -> Result<Pid> {
+        let pid = getpid();
+        match run_container(
+            id, rootfs, spec, init_pid, init, init_only, daemonize, csocketfd,
+            consolefd, tsocketfd,
+        ) {
+            Err(e) => {
+                // if we are the top level thread, kill all children
+                if pid == getpid() {
+                    signals::signal_children(Signal::SIGTERM).unwrap();
+                }
+                Err(e)
+            }
+            Ok(child_pid) => Ok(child_pid),
+        }
+    }
+
+    use selinux;
+    use capabilities;
+    use mounts;
+    use seccomp;
+    use nix::errno::Errno;
+    use lazy_static::initialize;
+    use nix::fcntl::{open, OFlag};
+    use process::fork_first;
+    use process::setid;
+    use nix::unistd::{close, write, setsid, dup2, chdir, Uid, Gid};
+    use process::fork_enter_pid;
+    use nix::unistd::sethostname;
+    use runtime::set_sysctl;
+    use pipe::reopen_dev_null;
+    use nix_ext::setgroups;
+    use process::{do_init, fork_final_child};
+    use nix::sys::socket::{sendmsg, listen, accept};
+    use pipe::wait_for_pipe_zero;
+    use runtime::do_exec;
+    use nix::sched::{setns, unshare, CloneFlags};
+    use nix::sys::socket::{ControlMessage, MsgFlags};
+    use nix::sys::stat::{fstat, Mode};
+    use {DEFAULT_DEVICES, NAMESPACES};
+    use cgroup_path_normalization;
+    use oci::Linux;
+    use oci::LinuxSeccomp;
+    use oci::LinuxCapabilities;
+    use process::setids;
+
+    pub fn run_container(
+        id: &str,
+        rootfs: &str,
+        spec: &Spec,
+        init_pid: Pid,
+        mut init: bool,
+        mut init_only: bool,
+        daemonize: bool,
+        csocketfd: RawFd,
+        mut consolefd: RawFd,
+        tsocketfd: RawFd,
+    ) -> Result<Pid> {
+        environment_checking(&spec.process.selinux_label, &spec.linux)?;
+
+        let wfd = {
+            let linux = spec.linux.as_ref().unwrap();
+
+            {
+                // initialize static variables before forking
+                initialize(&DEFAULT_DEVICES);
+                initialize(&NAMESPACES);
+                cgroups::init();
+            }
+
+            if !daemonize {
+                // 收容孤儿进程
+                if let Err(e) = prctl::set_child_subreaper(true) {
+                    bail!(format!("set subreaper returned {}", e));
+                };
+            }
+
+            // collect namespaces
+            let wfd = match collect_ns(id, rootfs, spec, init_pid, init,
+                             init_only, daemonize, csocketfd, consolefd)? {
+                (Some(pid), None) => return Ok(pid),
+                (None, Some(wfd)) => wfd,
+                (_, _) => unimplemented!()
+            };
+
+            init_env(
+                spec.process.user.uid,
+                spec.process.user.gid,
+                &spec.process.user.additional_gids,
+                &spec.process.cwd,
+                spec.process.no_new_privileges,
+                &spec.process.capabilities,
+                &linux.seccomp
+            );
+            (wfd)
+        };
+
+        // notify first parent that it can continue
+        debug!("writing zero to pipe to trigger poststart");
+        let data: &[u8] = &[0];
+        write(wfd, data).chain_err(|| "failed to write zero")?;
+
+        if init {
+            if init_only && tsocketfd == -1 {
+                do_init(wfd, daemonize)?;
+            } else {
+                fork_final_child(wfd, tsocketfd, daemonize)?;
+            }
+        }
+
+        // we nolonger need wfd, so close it
+        close(wfd).chain_err(|| "could not close wfd")?;
+
+        // wait for trigger
+        if tsocketfd != -1 {
+            listen(tsocketfd, 1)?;
+            let fd = accept(tsocketfd)?;
+            wait_for_pipe_zero(fd, -1)?;
+            close(fd).chain_err(|| "could not close accept fd")?;
+            close(tsocketfd).chain_err(|| "could not close trigger fd")?;
+        }
+
+        do_exec(&spec.process.args[0], &spec.process.args, &spec.process.env)?;
+        Ok(Pid::from_raw(-1))
+    }
+
+    /// Environment checking
+    pub fn environment_checking(selinux_label: &String, linux: &Option<Linux>) -> Result<()>{
+        if let Err(e) = prctl::set_dumpable(false) {
+            bail!(format!("set dumpable returned {}", e));
+        };
+
+        // if selinux is disabled, set will fail so print a warning
+        if !selinux_label.is_empty() {
+            if let Err(e) = selinux::setexeccon(&selinux_label) {
+                warn!(
+                    "could not set label to {}: {}",
+                    selinux_label, e
+                );
+            };
+        }
+
+        if linux.is_none() {
+            let msg = "linux config is empty".to_string();
+            return Err(ErrorKind::InvalidSpec(msg).into());
+        }
+
+        Ok(())
+    }
+
+
+    #[inline]
+    pub fn init_env(
+        uid: u32,
+        gid: u32,
+        gids: &Vec<u32>,
+        cwd: &String,
+        no_new_privileges: bool,
+        capabilities: &Option<LinuxCapabilities>,
+        seccomp: &Option<LinuxSeccomp>
+    ) -> Result<()> {
+        debug!("change to specified working directory");
+        // change to specified working directory
+        if !cwd.is_empty() {
+            chdir(&**cwd)?;
+        }
+
+        debug!("set uid/gid/groups");
+        setids(uid, gid, gids)?;
+
+        // NOTE: if we want init to pass signals to other processes, we may want
+        //       to hold on to cap kill until after the final fork.
+        if no_new_privileges {
+            if let Err(e) = prctl::set_no_new_privileges(true) {
+                bail!(format!("set no_new_privs returned {}", e));
+            };
+            // drop privileges
+            if let Some(ref c) = capabilities {
+                capabilities::drop_privileges(c)?;
+            }
+            if let Some(ref seccomp) = seccomp {
+                seccomp::initialize_seccomp(seccomp)?;
+            }
+        } else {
+            // NOTE: if we have not set no new priviliges, we must set up seccomp
+            //       before capset, which will error if seccomp blocks it
+            if let Some(ref seccomp) = seccomp {
+                seccomp::initialize_seccomp(seccomp)?;
+            }
+            // drop privileges
+            if let Some(ref c) = capabilities {
+                capabilities::drop_privileges(c)?;
+            }
+        }
+        Ok(())
+    }
+
+
+    pub fn redirect_io(
+        csocketfd: RawFd,
+        mut consolefd: RawFd
+    ) -> Result<(RawFd)> {
+        if csocketfd != -1 {
+            let mut slave: libc::c_int = unsafe { std::mem::uninitialized() };
+            let mut master: libc::c_int = unsafe { std::mem::uninitialized() };
+            let ret = unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            Errno::result(ret).chain_err(|| "could not openpty")?;
+            defer!(close(master).unwrap());
+            let data: &[u8] = b"/dev/ptmx";
+            let iov = [nix::sys::uio::IoVec::from_slice(data)];
+            //let fds = [master.as_raw_fd()];
+            let fds = [master];
+            let cmsg = ControlMessage::ScmRights(&fds);
+            sendmsg(csocketfd, &iov, &[cmsg], MsgFlags::empty(), None)?;
+            consolefd = slave;
+            close(csocketfd).chain_err(|| "could not close csocketfd")?;
+        }
+
+        if consolefd != -1 {
+            setsid()?;
+            if unsafe { libc::ioctl(consolefd, libc::TIOCSCTTY) } < 0 {
+                warn!("could not TIOCSCTTY");
+            };
+            dup2(consolefd, 0).chain_err(|| "could not dup tty to stdin")?;
+            dup2(consolefd, 1).chain_err(|| "could not dup tty to stdout")?;
+            dup2(consolefd, 2).chain_err(|| "could not dup tty to stderr")?;
+
+            if consolefd > 2 {
+                close(consolefd).chain_err(|| "could not close consolefd")?;
+            }
+
+            // NOTE: we may need to fix up the mount of /dev/console
+        }
+        Ok((consolefd))
+    }
+
+    pub fn collect_ns(
+        id: &str,
+        rootfs: &str,
+        spec: &Spec,
+        init_pid: Pid,
+        mut init: bool,
+        mut init_only: bool,
+        daemonize: bool,
+        csocketfd: RawFd,
+        mut consolefd: RawFd,
+    ) -> Result<(Option<Pid>, Option<RawFd>)> {
+        let linux = spec.linux.as_ref().unwrap();
+        debug!("collect namespaces");
+        let mut cf = CloneFlags::empty();
+
+        let (wfd, cpath, bind_devices, mount_fd) = {
+            let cpath = cgroup_path_normalization(id, &linux.cgroups_path)?;
+
+            let mut to_enter = Vec::new();
+
+            for ns in &linux.namespaces {
+                let space = CloneFlags::from_bits_truncate(ns.typ as i32);
+                if ns.path.is_empty() {
+                    cf |= space;
+                } else {
+                    let fd = open(&*ns.path, OFlag::empty(), Mode::empty())
+                        .chain_err(|| format!("failed to open file for {:?}", space))?;
+                    to_enter.push((space, fd));
+                }
+            }
+
+            let mut enter_pid = false;
+            if cf.contains(CloneFlags::CLONE_NEWPID) {
+                // needed new PID namespace
+                enter_pid = true;
+            }
+
+            if !enter_pid {
+                init = false;
+                init_only = false;
+            }
+
+            let mut bind_devices = false;
+            let mut userns = false;
+
+            // fork for userns and cgroups
+            if cf.contains(CloneFlags::CLONE_NEWUSER) {
+                bind_devices = true;
+                userns = true;
+            }
+
+            let (child_pid, wfd) = fork_first(
+                id, init_pid, enter_pid, init_only, daemonize, userns, &linux, &spec.process.rlimits,
+                &cpath, spec
+            )?;
+
+            // parent returns child pid and exits
+            if child_pid != Pid::from_raw(-1) {
+                return Ok((Some(child_pid), None));
+            }
+
+            let mut mount_fd = -1;
+            // enter path namespaces
+            for &(space, fd) in &to_enter {
+                if space == CloneFlags::CLONE_NEWNS {
+                    // enter mount ns last
+                    mount_fd = fd;
+                    continue;
+                }
+                setns(fd, space).chain_err(|| format!("failed to enter {:?}", space))?;
+                close(fd)?;
+                if space == CloneFlags::CLONE_NEWUSER {
+                    setid(Uid::from_raw(0), Gid::from_raw(0))
+                        .chain_err(|| "failed to setid")?;
+                    bind_devices = true;
+                }
+            }
+
+            // unshare other ns
+            let chain = || format!("failed to unshare {:?}", cf);
+            unshare(cf & !CloneFlags::CLONE_NEWUSER).chain_err(chain)?;
+
+            if enter_pid {
+                fork_enter_pid(init, daemonize)?;
+            };
+            (wfd, cpath, bind_devices, mount_fd)
+        };
+
+        if cf.contains(CloneFlags::CLONE_NEWUTS) {
+            sethostname(&spec.hostname)?;
+        }
+
+        if cf.contains(CloneFlags::CLONE_NEWNS) {
+            mounts::init_rootfs(spec, rootfs, &cpath, bind_devices)
+                .chain_err(|| "failed to init rootfs")?;
+        }
+
+        if !init_only {
+            // notify first parent that it can continue
+            debug!("writing zero to pipe to trigger prestart");
+            let data: &[u8] = &[0];
+            write(wfd, data).chain_err(|| "failed to write zero")?;
+        }
+
+        if mount_fd != -1 {
+            setns(mount_fd, CloneFlags::CLONE_NEWNS).chain_err(|| {
+                "failed to enter CloneFlags::CLONE_NEWNS".to_string()
+            })?;
+            close(mount_fd)?;
+        }
+
+        if cf.contains(CloneFlags::CLONE_NEWNS) {
+            mounts::pivot_rootfs(&*rootfs).chain_err(|| "failed to pivot rootfs")?;
+
+            // only set sysctls in newns
+            for (key, value) in &linux.sysctl {
+                set_sysctl(key, value)?;
+            }
+
+            // NOTE: apparently criu has problems if pointing to an fd outside
+            //       the filesystem namespace.
+            reopen_dev_null()?;
+        }
+
+        consolefd = redirect_io(csocketfd, consolefd)?;
+
+        if cf.contains(CloneFlags::CLONE_NEWNS) {
+            mounts::finish_rootfs(spec).chain_err(|| "failed to finish rootfs")?;
+        }
+
+        Ok((None, Some(wfd)))
+    }
 }

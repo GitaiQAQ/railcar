@@ -24,7 +24,6 @@ extern crate railcar;
 
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use errors::*;
-use lazy_static::initialize;
 use nix::errno::Errno;
 use nix::fcntl::{open, OFlag};
 use nix::poll::{poll, EventFlags, PollFd};
@@ -54,7 +53,7 @@ use sync::Cond;
 use railcar::{capabilities, cgroups, mounts, nix_ext, seccomp, selinux, signals, sync};
 use railcar::{errors, logger};
 
-use railcar::{DEFAULT_DEVICES, NAMESPACES, CONFIG, INIT_PID, PROCESS_PID, TSOCKETFD};
+use railcar::{NAMESPACES, CONFIG, INIT_PID, PROCESS_PID, TSOCKETFD};
 use railcar::process::*;
 use railcar::pipe::*;
 use railcar::runtime::*;
@@ -64,6 +63,7 @@ use railcar::state_from_dir;
 use railcar::instance_dir;
 use railcar::get_init_pid;
 use railcar::pseudo_tyy;
+use railcar::container::safe_run_container;
 
 #[cfg(feature = "nightly")]
 static mut ARGC: isize = 0 as isize;
@@ -306,6 +306,13 @@ fn run() -> Result<()> {
                 )
                 .about("List processes in a (previously created) container"),
         )
+        .subcommand(
+            SubCommand::with_name("spec")
+                .setting(AppSettings::ColoredHelp)
+                .about(
+                    "",
+                ),
+        )
         .get_matches_from(get_args());
     let level = match matches.occurrences_of("v") {
         0 => log::LevelFilter::Info, //default
@@ -358,6 +365,9 @@ fn run() -> Result<()> {
         ("state", Some(state_matches)) => {
             cmd_state(state_matches.value_of("id").unwrap(), &state_dir)
         }
+        ("spec", Some(state_matches)) => {
+            cmd_spec()
+        }
         // We should never reach here because clap already enforces this
         _ => bail!("command not recognized"),
     }
@@ -401,7 +411,7 @@ fn finish_create(id: &str, dir: &str, matches: &ArgMatches) -> Result<()> {
         .to_string_lossy()
         .into_owned();
 
-    chdir(&*dir).chain_err(|| format!("failed to chdir to {}", &dir))?;
+    chdir(&*dir).chain_err(|| format!("failed to change the current working directory to {}", &dir))?;
     // NOTE: There are certain configs where we will not be able to create a
     //       console during start, so this could potentially create the
     //       console during init and pass to the process via sendmsg. This
@@ -436,6 +446,7 @@ fn finish_create(id: &str, dir: &str, matches: &ArgMatches) -> Result<()> {
         consolefd,
         tsocketfd,
     )?;
+
     if child_pid != Pid::from_raw(-1) {
         debug!("writing init pid file {}", child_pid);
         let mut f = File::create(INIT_PID)?;
@@ -465,7 +476,7 @@ fn finish_create(id: &str, dir: &str, matches: &ArgMatches) -> Result<()> {
             sysctl: HashMap::new(),
             resources: None,
             cgroups_path: linux.cgroups_path.to_owned(),
-            namespaces: namespaces,
+            namespaces,
             devices: Vec::new(),
             seccomp: None,
             rootfs_propagation: "".to_string(),
@@ -502,6 +513,7 @@ fn cmd_start(id: &str, state_dir: &str) -> Result<()> {
 
     // we use instance dir for config written out by create
     let dir = instance_dir(id, state_dir);
+    debug!("config written out to {}", dir);
     chdir(&*dir).chain_err(|| format!("instance {} doesn't exist", id))?;
 
     let spec =
@@ -747,8 +759,8 @@ fn cmd_delete(id: &str, state_dir: &str, matches: &ArgMatches) -> Result<()> {
 fn cmd_run(id: &str, matches: &ArgMatches) -> Result<()> {
     let bundle = matches.value_of("bundle").unwrap();
     chdir(&*bundle).chain_err(|| format!("failed to chdir to {}", bundle))?;
-    let spec =
-        Spec::load(CONFIG).chain_err(|| format!("failed to load {}", CONFIG))?;
+    let spec = Spec::default();
+        // Spec::load(CONFIG).chain_err(|| format!("failed to load {}", CONFIG))?;
 
     let child_pid = safe_run_container(
         id,
@@ -766,302 +778,7 @@ fn cmd_run(id: &str, matches: &ArgMatches) -> Result<()> {
     Ok(())
 }
 
-fn safe_run_container(
-    id: &str,
-    rootfs: &str,
-    spec: &Spec,
-    init_pid: Pid,
-    init: bool,
-    init_only: bool,
-    daemonize: bool,
-    csocketfd: RawFd,
-    consolefd: RawFd,
-    tsocketfd: RawFd,
-) -> Result<Pid> {
-    let pid = getpid();
-    match run_container(
-        id, rootfs, spec, init_pid, init, init_only, daemonize, csocketfd,
-        consolefd, tsocketfd,
-    ) {
-        Err(e) => {
-            // if we are the top level thread, kill all children
-            if pid == getpid() {
-                signals::signal_children(Signal::SIGTERM).unwrap();
-            }
-            Err(e)
-        }
-        Ok(child_pid) => Ok(child_pid),
-    }
-}
-
-fn run_container(
-    id: &str,
-    rootfs: &str,
-    spec: &Spec,
-    init_pid: Pid,
-    mut init: bool,
-    mut init_only: bool,
-    daemonize: bool,
-    csocketfd: RawFd,
-    mut consolefd: RawFd,
-    tsocketfd: RawFd,
-) -> Result<Pid> {
-    if let Err(e) = prctl::set_dumpable(false) {
-        bail!(format!("set dumpable returned {}", e));
-    };
-
-    // if selinux is disabled, set will fail so print a warning
-    if !spec.process.selinux_label.is_empty() {
-        if let Err(e) = selinux::setexeccon(&spec.process.selinux_label) {
-            warn!(
-                "could not set label to {}: {}",
-                spec.process.selinux_label, e
-            );
-        };
-    }
-
-    if spec.linux.is_none() {
-        let msg = "linux config is empty".to_string();
-        return Err(ErrorKind::InvalidSpec(msg).into());
-    }
-
-    let linux = spec.linux.as_ref().unwrap();
-
-    // initialize static variables before forking
-    initialize(&DEFAULT_DEVICES);
-    initialize(&NAMESPACES);
-    cgroups::init();
-
-    // collect namespaces
-    let mut cf = CloneFlags::empty();
-    let mut to_enter = Vec::new();
-    let mut enter_pid = false;
-
-    for ns in &linux.namespaces {
-        let space = CloneFlags::from_bits_truncate(ns.typ as i32);
-        if space == CloneFlags::CLONE_NEWPID {
-            // new sub PID namespace
-            enter_pid = true;
-        }
-        if ns.path.is_empty() {
-            cf |= space;
-        } else {
-            let fd = open(&*ns.path, OFlag::empty(), Mode::empty())
-                .chain_err(|| format!("failed to open file for {:?}", space))?;
-            to_enter.push((space, fd));
-        }
-    }
-
-    if !enter_pid {
-        init = false;
-        init_only = false;
-    }
-
-    let cpath = if linux.cgroups_path == "" {
-        format! {"/{}", id}
-    } else {
-        linux.cgroups_path.clone()
-    };
-
-    let mut bind_devices = false;
-    let mut userns = false;
-    let rlimits = &spec.process.rlimits;
-    // fork for userns and cgroups
-    if cf.contains(CloneFlags::CLONE_NEWUSER) {
-        bind_devices = true;
-        userns = true;
-    }
-
-    if !daemonize {
-        if let Err(e) = prctl::set_child_subreaper(true) {
-            bail!(format!("set subreaper returned {}", e));
-        };
-    }
-    let (child_pid, wfd) = fork_first(
-        id, init_pid, enter_pid, init_only, daemonize, userns, linux, rlimits,
-        &cpath, spec,
-    )?;
-
-    // parent returns child pid and exits
-    if child_pid != Pid::from_raw(-1) {
-        return Ok(child_pid);
-    }
-
-    let mut mount_fd = -1;
-    // enter path namespaces
-    for &(space, fd) in &to_enter {
-        if space == CloneFlags::CLONE_NEWNS {
-            // enter mount ns last
-            mount_fd = fd;
-            continue;
-        }
-        setns(fd, space).chain_err(|| format!("failed to enter {:?}", space))?;
-        close(fd)?;
-        if space == CloneFlags::CLONE_NEWUSER {
-            setid(Uid::from_raw(0), Gid::from_raw(0))
-                .chain_err(|| "failed to setid")?;
-            bind_devices = true;
-        }
-    }
-
-    // TODO: handle systemd-style cgroup_path
-    if !cpath.starts_with('/') {
-        let msg = "cgroup path must be absolute".to_string();
-        return Err(ErrorKind::InvalidSpec(msg).into());
-    }
-
-    // unshare other ns
-    let chain = || format!("failed to unshare {:?}", cf);
-    unshare(cf & !CloneFlags::CLONE_NEWUSER).chain_err(chain)?;
-
-    if enter_pid {
-        fork_enter_pid(init, daemonize)?;
-    };
-
-    if cf.contains(CloneFlags::CLONE_NEWUTS) {
-        sethostname(&spec.hostname)?;
-    }
-
-    if cf.contains(CloneFlags::CLONE_NEWNS) {
-        mounts::init_rootfs(spec, rootfs, &cpath, bind_devices)
-            .chain_err(|| "failed to init rootfs")?;
-    }
-
-    if !init_only {
-        // notify first parent that it can continue
-        debug!("writing zero to pipe to trigger prestart");
-        let data: &[u8] = &[0];
-        write(wfd, data).chain_err(|| "failed to write zero")?;
-    }
-
-    if mount_fd != -1 {
-        setns(mount_fd, CloneFlags::CLONE_NEWNS).chain_err(|| {
-            "failed to enter CloneFlags::CLONE_NEWNS".to_string()
-        })?;
-        close(mount_fd)?;
-    }
-
-    if cf.contains(CloneFlags::CLONE_NEWNS) {
-        mounts::pivot_rootfs(&*rootfs).chain_err(|| "failed to pivot rootfs")?;
-
-        // only set sysctls in newns
-        for (key, value) in &linux.sysctl {
-            set_sysctl(key, value)?;
-        }
-
-        // NOTE: apparently criu has problems if pointing to an fd outside
-        //       the filesystem namespace.
-        reopen_dev_null()?;
-    }
-
-    if csocketfd != -1 {
-        let mut slave: libc::c_int = unsafe { std::mem::uninitialized() };
-        let mut master: libc::c_int = unsafe { std::mem::uninitialized() };
-        let ret = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        Errno::result(ret).chain_err(|| "could not openpty")?;
-        defer!(close(master).unwrap());
-        let data: &[u8] = b"/dev/ptmx";
-        let iov = [nix::sys::uio::IoVec::from_slice(data)];
-        //let fds = [master.as_raw_fd()];
-        let fds = [master];
-        let cmsg = ControlMessage::ScmRights(&fds);
-        sendmsg(csocketfd, &iov, &[cmsg], MsgFlags::empty(), None)?;
-        consolefd = slave;
-        close(csocketfd).chain_err(|| "could not close csocketfd")?;
-    }
-    if consolefd != -1 {
-        setsid()?;
-        if unsafe { libc::ioctl(consolefd, libc::TIOCSCTTY) } < 0 {
-            warn!("could not TIOCSCTTY");
-        };
-        dup2(consolefd, 0).chain_err(|| "could not dup tty to stdin")?;
-        dup2(consolefd, 1).chain_err(|| "could not dup tty to stdout")?;
-        dup2(consolefd, 2).chain_err(|| "could not dup tty to stderr")?;
-
-        if consolefd > 2 {
-            close(consolefd).chain_err(|| "could not close consolefd")?;
-        }
-
-        // NOTE: we may need to fix up the mount of /dev/console
-    }
-
-    if cf.contains(CloneFlags::CLONE_NEWNS) {
-        mounts::finish_rootfs(spec).chain_err(|| "failed to finish rootfs")?;
-    }
-
-    // change to specified working directory
-    if !spec.process.cwd.is_empty() {
-        chdir(&*spec.process.cwd)?;
-    }
-
-    debug!("setting ids");
-
-    // set uid/gid/groups
-    let uid = Uid::from_raw(spec.process.user.uid);
-    let gid = Gid::from_raw(spec.process.user.gid);
-    setid(uid, gid)?;
-    if !spec.process.user.additional_gids.is_empty() {
-        setgroups(&spec.process.user.additional_gids)?;
-    }
-
-    // NOTE: if we want init to pass signals to other processes, we may want
-    //       to hold on to cap kill until after the final fork.
-    if spec.process.no_new_privileges {
-        if let Err(e) = prctl::set_no_new_privileges(true) {
-            bail!(format!("set no_new_privs returned {}", e));
-        };
-        // drop privileges
-        if let Some(ref c) = spec.process.capabilities {
-            capabilities::drop_privileges(c)?;
-        }
-        if let Some(ref seccomp) = linux.seccomp {
-            seccomp::initialize_seccomp(seccomp)?;
-        }
-    } else {
-        // NOTE: if we have not set no new priviliges, we must set up seccomp
-        //       before capset, which will error if seccomp blocks it
-        if let Some(ref seccomp) = linux.seccomp {
-            seccomp::initialize_seccomp(seccomp)?;
-        }
-        // drop privileges
-        if let Some(ref c) = spec.process.capabilities {
-            capabilities::drop_privileges(c)?;
-        }
-    }
-
-    // notify first parent that it can continue
-    debug!("writing zero to pipe to trigger poststart");
-    let data: &[u8] = &[0];
-    write(wfd, data).chain_err(|| "failed to write zero")?;
-
-    if init {
-        if init_only && tsocketfd == -1 {
-            do_init(wfd, daemonize)?;
-        } else {
-            fork_final_child(wfd, tsocketfd, daemonize)?;
-        }
-    }
-
-    // we nolonger need wfd, so close it
-    close(wfd).chain_err(|| "could not close wfd")?;
-
-    // wait for trigger
-    if tsocketfd != -1 {
-        listen(tsocketfd, 1)?;
-        let fd = accept(tsocketfd)?;
-        wait_for_pipe_zero(fd, -1)?;
-        close(fd).chain_err(|| "could not close accept fd")?;
-        close(tsocketfd).chain_err(|| "could not close trigger fd")?;
-    }
-
-    do_exec(&spec.process.args[0], &spec.process.args, &spec.process.env)?;
-    Ok(Pid::from_raw(-1))
+fn cmd_spec() -> Result<()> {
+    print!("{}", oci::Spec::default().to_string());
+    Ok(())
 }

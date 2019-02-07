@@ -38,7 +38,6 @@ fn is_default<T: Default + PartialEq>(b: &T) -> bool {
     *b == T::default()
 }
 
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct User {
     #[serde(default)]
@@ -50,6 +49,17 @@ pub struct User {
     pub additional_gids: Vec<u32>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub username: String,
+}
+
+impl Default for User {
+    fn default() -> Self {
+        User {
+            uid: 0,
+            gid: 0,
+            additional_gids: vec![],
+            username: "".to_string()
+        }
+    }
 }
 
 // this converts directly to the correct int
@@ -81,6 +91,18 @@ pub struct LinuxRlimit {
     pub hard: u64,
     #[serde(default)]
     pub soft: u64,
+}
+
+impl LinuxRlimit {
+    fn default() -> Vec<Self> {
+        vec![
+            LinuxRlimit {
+                typ: LinuxRlimitType::RLIMIT_NOFILE,
+                hard: 1024,
+                soft: 1024
+            }
+        ]
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -140,6 +162,38 @@ pub struct LinuxCapabilities {
     pub ambient: Vec<LinuxCapabilityType>,
 }
 
+impl Default for LinuxCapabilities {
+    fn default() -> Self {
+        LinuxCapabilities{
+            bounding: vec![
+                LinuxCapabilityType::CAP_AUDIT_WRITE,
+                LinuxCapabilityType::CAP_KILL,
+                LinuxCapabilityType::CAP_NET_BIND_SERVICE
+            ],
+            effective: vec![
+                LinuxCapabilityType::CAP_AUDIT_WRITE,
+                LinuxCapabilityType::CAP_KILL,
+                LinuxCapabilityType::CAP_NET_BIND_SERVICE
+            ],
+            inheritable: vec![
+                LinuxCapabilityType::CAP_AUDIT_WRITE,
+                LinuxCapabilityType::CAP_KILL,
+                LinuxCapabilityType::CAP_NET_BIND_SERVICE
+            ],
+            permitted: vec![
+                LinuxCapabilityType::CAP_AUDIT_WRITE,
+                LinuxCapabilityType::CAP_KILL,
+                LinuxCapabilityType::CAP_NET_BIND_SERVICE
+            ],
+            ambient: vec![
+                LinuxCapabilityType::CAP_AUDIT_WRITE,
+                LinuxCapabilityType::CAP_KILL,
+                LinuxCapabilityType::CAP_NET_BIND_SERVICE
+            ]
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Process {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -167,6 +221,29 @@ pub struct Process {
     #[serde(default, skip_serializing_if = "String::is_empty",
             rename = "selinuxLabel")]
     pub selinux_label: String,
+}
+
+impl Default for Process {
+    fn default() -> Self {
+        Process {
+            terminal: false,
+            console_size: Box::default(),
+            user: User::default(),
+            args: vec![
+                "sh".to_string()
+            ],
+            env: vec![
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+                "TERM=xterm".to_string()
+            ],
+            cwd: "/".to_string(),
+            capabilities: Some(LinuxCapabilities::default()),
+            rlimits: LinuxRlimit::default(),
+            no_new_privileges: false,
+            apparmor_profile: "".to_string(),
+            selinux_label: "".to_string()
+        }
+    }
 }
 
 use serde::Deserialize;
@@ -255,6 +332,15 @@ pub struct Root {
     pub readonly: bool,
 }
 
+impl Default for Root {
+    fn default() -> Self {
+        Root {
+            path: "rootfs".to_string(),
+            readonly: true
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Mount {
     #[serde(default)]
@@ -265,6 +351,82 @@ pub struct Mount {
     pub source: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
+}
+
+impl Mount {
+    fn default() -> Vec<Self> {
+        vec![
+            Mount{
+                destination: String::from("/proc"),
+                typ: String::from("proc"),
+                source: String::from("proc"),
+                options: Vec::new()
+            }, Mount{
+                destination: String::from("/dev"),
+                typ: String::from("tmpfs"),
+                source: String::from("tmpfs"),
+                options: vec!(
+                    "nosuid".to_string(),
+                    "strictatime".to_string(),
+                    "mode=755".to_string(),
+                    "size=65536k".to_string()
+                )
+            }, Mount{
+                destination: String::from("/dev/pts"),
+                typ: String::from("devpts"),
+                source: String::from("devpts"),
+                options: vec!(
+                    "nosuid".to_string(),
+                    "noexec".to_string(),
+                    "newinstance".to_string(),
+                    "ptmxmode=0666".to_string(),
+                    "mode=0620".to_string(),
+                    "gid=5".to_string()
+                )
+            }, Mount{
+                destination: String::from("/dev/shm"),
+                typ: String::from("tmpfs"),
+                source: String::from("shm"),
+                options: vec!(
+                    "nosuid".to_string(),
+                    "noexec".to_string(),
+                    "nodev".to_string(),
+                    "mode=1777".to_string(),
+                    "size=65536k".to_string()
+                )
+            }, Mount{
+                destination: String::from("/dev/mqueue"),
+                typ: String::from("mqueue"),
+                source: String::from("mqueue"),
+                options: vec!(
+                    "nosuid".to_string(),
+                    "noexec".to_string(),
+                    "nodev".to_string()
+                )
+            }, Mount{
+                destination: String::from("/sys"),
+                typ: String::from("sysfs"),
+                source: String::from("sysfs"),
+                options: vec!(
+                    "nosuid".to_string(),
+                    "noexec".to_string(),
+                    "nodev".to_string(),
+                    "ro".to_string()
+                )
+            }, Mount{
+                destination: String::from("/sys/fs/cgroup"),
+                typ: String::from("cgroup"),
+                source: String::from("cgroup"),
+                options: vec!(
+                    "nosuid".to_string(),
+                    "noexec".to_string(),
+                    "nodev".to_string(),
+                    "relatime".to_string(),
+                    "ro".to_string()
+                )
+            }
+        ]
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -327,6 +489,18 @@ pub struct LinuxDeviceCgroup {
     pub minor: Option<i64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub access: String,
+}
+
+impl Default for LinuxDeviceCgroup {
+    fn default() -> Self {
+        LinuxDeviceCgroup{
+            allow: false,
+            typ: LinuxDeviceType::default(),
+            major: None,
+            minor: None,
+            access: String::from("rwm")
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -442,7 +616,7 @@ pub struct LinuxNetwork {
     pub priorities: Vec<LinuxInterfacePriority>,
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct LinuxResources {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<LinuxDeviceCgroup>,
@@ -470,6 +644,22 @@ pub struct LinuxResources {
     pub network: Option<LinuxNetwork>,
 }
 
+impl Default for LinuxResources {
+    fn default() -> Self {
+        LinuxResources {
+            devices: vec![LinuxDeviceCgroup::default()],
+            disable_oom_killer: false,
+            oom_score_adj: None,
+            memory: None,
+            cpu: None,
+            pids: None,
+            block_io: None,
+            hugepage_limits: Vec::new(),
+            network: None
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum LinuxNamespaceType {
     mount = 0x00020000, /* New mount namespace group */
@@ -487,6 +677,27 @@ pub struct LinuxNamespace {
     pub typ: LinuxNamespaceType,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
+}
+
+impl LinuxNamespace {
+    fn default() -> Vec<Self> {
+        vec!(LinuxNamespace{
+            typ: LinuxNamespaceType::pid,
+            path: String::new()
+        }, LinuxNamespace{
+            typ: LinuxNamespaceType::network,
+            path: String::new()
+        }, LinuxNamespace{
+            typ: LinuxNamespaceType::ipc,
+            path: String::new()
+        }, LinuxNamespace{
+            typ: LinuxNamespaceType::uts,
+            path: String::new()
+        }, LinuxNamespace{
+            typ: LinuxNamespaceType::mount,
+            path: String::new()
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -618,6 +829,40 @@ pub struct Linux {
     pub mount_label: String,
 }
 
+impl Default for Linux {
+    fn default() -> Self {
+        Linux {
+            uid_mappings: Vec::new(),
+            gid_mappings: Vec::new(),
+            sysctl: HashMap::new(),
+            resources: Some(LinuxResources::default()),
+            cgroups_path: String::new(),
+            namespaces: LinuxNamespace::default(),
+            devices: Vec::new(),
+            seccomp: None,
+            rootfs_propagation: String::new(),
+            masked_paths: vec![
+                "/proc/kcore".to_string(),
+                "/proc/latency_stats".to_string(),
+                "/proc/timer_list".to_string(),
+                "/proc/timer_stats".to_string(),
+                "/proc/sched_debug".to_string(),
+                "/sys/firmware".to_string(),
+                "/proc/scsi".to_string()
+            ],
+            readonly_paths: vec![
+                "/proc/asound".to_string(),
+                "/proc/bus".to_string(),
+                "/proc/fs".to_string(),
+                "/proc/irq".to_string(),
+                "/proc/sys".to_string(),
+                "/proc/sysrq-trigger".to_string()
+            ],
+            mount_label: String::new()
+        }
+    }
+}
+
 // NOTE: Solaris and Windows are ignored for the moment
 pub type Solaris = Value;
 pub type Windows = Value;
@@ -648,6 +893,30 @@ pub struct Spec {
     pub solaris: Option<Solaris>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub windows: Option<Windows>,
+}
+
+impl Default for Spec {
+    fn default() -> Self {
+        Spec {
+            version: "1.0.0".to_string(),
+            platform: None,
+            process: Process::default(),
+            root: Root::default(),
+            hostname: "runc".to_string(),
+            mounts: Mount::default(),
+            hooks: None,
+            annotations: HashMap::new(),
+            linux: Some(Linux::default()),
+            solaris: None,
+            windows: None
+        }
+    }
+}
+
+impl ToString for Spec {
+    fn to_string(&self) -> String {
+        serialize::to_json(self).unwrap()
+    }
 }
 
 impl Spec {

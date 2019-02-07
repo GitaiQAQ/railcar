@@ -81,3 +81,9 @@ pub fn to_string<T: serde::Serialize>(
 ) -> Result<String, SerializeError> {
     Ok(serde_json::to_string(&obj)?)
 }
+
+pub fn to_json<T: serde::Serialize>(
+    obj: &T,
+) -> Result<String, SerializeError> {
+    Ok(serde_json::to_string_pretty(&obj)?)
+}

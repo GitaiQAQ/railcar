@@ -10,7 +10,7 @@ use nix::unistd::{chdir, chown, close, getcwd, pivot_root};
 use nix::unistd::{Gid, Uid};
 use nix::NixPath;
 use nix_ext::fchdir;
-use oci::{LinuxDevice, LinuxDeviceType, Mount, Spec};
+use oci::{Linux, LinuxDevice, LinuxDeviceType, Mount, Spec};
 use selinux::setfilecon;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -18,15 +18,26 @@ use std::fs::{canonicalize, create_dir_all, remove_file};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+
 pub fn init_rootfs(
     spec: &Spec,
     rootfs: &str,
     cpath: &str,
     bind_devices: bool,
 ) -> Result<()> {
+    init_rootfs_without_spec(&spec.linux, &spec.mounts, rootfs, cpath, bind_devices)
+}
+
+pub fn init_rootfs_without_spec(
+    linux: &Option<Linux>,
+    mounts: &Vec<Mount>,
+    rootfs: &str,
+    cpath: &str,
+    bind_devices: bool,
+) -> Result<()> {
     // set namespace propagation
     let mut flags = MsFlags::MS_REC;
-    match spec.linux {
+    match linux {
         Some(ref linux) => match linux.rootfs_propagation.as_ref() {
             "shared" => {
                 flags |= MsFlags::MS_SHARED;
@@ -53,7 +64,7 @@ pub fn init_rootfs(
             Ok(())
         }
     }?;
-    let linux = spec.linux.as_ref().unwrap();
+    let linux = linux.as_ref().unwrap();
     mount(None::<&str>, "/", None::<&str>, flags, None::<&str>)?;
 
     // mount root dir
@@ -65,7 +76,7 @@ pub fn init_rootfs(
         None::<&str>,
     )?;
 
-    for m in &spec.mounts {
+    for m in mounts {
         // TODO: check for nasty destinations involving symlinks and illegal
         //       locations.
         // NOTE: this strictly is less permissive than runc, which allows ..
@@ -119,7 +130,15 @@ pub fn pivot_rootfs<P: ?Sized + NixPath>(path: &P) -> Result<()> {
 }
 
 pub fn finish_rootfs(spec: &Spec) -> Result<()> {
-    if let Some(ref linux) = spec.linux {
+    finish_rootfs_without_spec(&spec.linux, &spec.mounts, spec.root.readonly)
+}
+
+pub fn finish_rootfs_without_spec(
+    linux: &Option<Linux>,
+    mounts: &Vec<Mount>,
+    readonly: bool
+) -> Result<()> {
+    if let Some(ref linux) = linux {
         for path in &linux.masked_paths {
             mask_path(path)?;
         }
@@ -129,7 +148,7 @@ pub fn finish_rootfs(spec: &Spec) -> Result<()> {
     }
 
     // remount dev ro if necessary
-    for m in &spec.mounts {
+    for m in mounts {
         if m.destination == "/dev" {
             let (flags, _) = parse_mount(m);
             if flags.contains(MsFlags::MS_RDONLY) {
@@ -144,7 +163,7 @@ pub fn finish_rootfs(spec: &Spec) -> Result<()> {
         }
     }
 
-    if spec.root.readonly {
+    if readonly {
         let flags = MsFlags::MS_BIND
             | MsFlags::MS_RDONLY
             | MsFlags::MS_NODEV
