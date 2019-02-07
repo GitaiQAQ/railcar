@@ -278,14 +278,26 @@ pub mod process {
         }
     }
 
+    impl Timeval {
+        fn as_millis(&self) -> f64 {
+            (self.tv_sec * 1000) as f64 + (self.tv_usec as f64 / 1000.0)
+        }
+    }
+
+    impl Display for Timeval {
+        fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+            write!(f, "{}", self.as_millis())
+        }
+    }
+
     #[derive(Debug)]
     pub struct Rusage {
         // user time used
-        ru_utime: Timeval,
+        pub ru_utime: Timeval,
         // system time used
-        ru_stime: Timeval,
+        pub ru_stime: Timeval,
         // maximum resident set size
-        ru_maxrss: c_long,
+        pub ru_maxrss: c_long,
         // integral shared memory size
         ru_ixrss: c_long,
         // integral unshared data size
@@ -409,8 +421,12 @@ pub mod process {
                 }
                 Ok(s) => s,
             };
-            info!("time: {}s", now.elapsed().unwrap().as_float_secs());
-            info!("rusage: {:?}", rusage);
+
+//            info!("user(ms): {}, system(ms): {}, total(ms): {}, memory(b): {}",
+//                  rusage.ru_utime, rusage.ru_stime,
+//                  now.elapsed().unwrap().as_millis(),
+//                  rusage.ru_maxrss * 1024);
+
             match result {
                 WaitStatus::Exited(pid, code) => {
                     if child != Pid::from_raw(-1) && pid != child {
@@ -643,6 +659,10 @@ pub mod process {
     use state;
     use nix_ext::setgroups;
     use seccomp;
+    use std::fmt::Display;
+    use std::fmt::Formatter;
+    use std::fmt;
+    use std::fmt::Debug;
 
     pub fn do_init(wfd: RawFd, daemonize: bool) -> Result<()> {
         if daemonize {
@@ -1224,7 +1244,6 @@ pub mod container {
         Ok(())
     }
 
-
     #[inline]
     pub fn init_env(
         uid: u32,
@@ -1270,7 +1289,6 @@ pub mod container {
         }
         Ok(())
     }
-
 
     pub fn redirect_io(
         csocketfd: RawFd,
