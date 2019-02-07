@@ -422,10 +422,10 @@ pub mod process {
                 Ok(s) => s,
             };
 
-//            info!("user(ms): {}, system(ms): {}, total(ms): {}, memory(b): {}",
-//                  rusage.ru_utime, rusage.ru_stime,
-//                  now.elapsed().unwrap().as_millis(),
-//                  rusage.ru_maxrss * 1024);
+            info!("user(ms): {}, system(ms): {}, total(ms): {}, memory(b): {}",
+                  rusage.ru_utime, rusage.ru_stime,
+                  now.elapsed().unwrap().as_millis(),
+                  rusage.ru_maxrss * 1024);
 
             match result {
                 WaitStatus::Exited(pid, code) => {
@@ -1221,6 +1221,7 @@ pub mod container {
     }
 
     /// Environment checking
+    #[inline]
     pub fn environment_checking(selinux_label: &String, linux: &Option<Linux>) -> Result<()>{
         if let Err(e) = prctl::set_dumpable(false) {
             bail!(format!("set dumpable returned {}", e));
@@ -1290,6 +1291,7 @@ pub mod container {
         Ok(())
     }
 
+    #[inline]
     pub fn redirect_io(
         csocketfd: RawFd,
         mut consolefd: RawFd
@@ -1336,6 +1338,7 @@ pub mod container {
         Ok((consolefd))
     }
 
+    #[inline]
     pub fn collect_ns(
         id: &str,
         rootfs: &str,

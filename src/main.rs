@@ -759,8 +759,7 @@ fn cmd_delete(id: &str, state_dir: &str, matches: &ArgMatches) -> Result<()> {
 fn cmd_run(id: &str, matches: &ArgMatches) -> Result<()> {
     let bundle = matches.value_of("bundle").unwrap();
     chdir(&*bundle).chain_err(|| format!("failed to chdir to {}", bundle))?;
-    let spec = Spec::default();
-        // Spec::load(CONFIG).chain_err(|| format!("failed to load {}", CONFIG))?;
+    let spec = Spec::load(CONFIG).chain_err(|| format!("failed to load {}", CONFIG))?;
 
     let child_pid = safe_run_container(
         id,
